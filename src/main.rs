@@ -1,9 +1,22 @@
-use std::{error, io::{self, Error}, net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs}, os::windows::io::IntoRawSocket, rc::Rc, sync::{Arc, Mutex}, thread};
-use log::{info};
-use clap::{self, Parser};
-use isocountry::CountryCode;
+use std::{fmt::{Debug, Display}, io::{self, Read, Write}, 
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use clap::{self, builder::Str, Parser};
+use isocountry::CountryCode;
+use backend::Backend;
+use selectors::{RoundRobinSelector, Selector};
+
+use log::{error, info};
+
+mod backend;
 mod pool;
+mod selectors;
+mod tests;
+
+
 // make a load balancer with the following requirements:
 // 1. Multi-strategy (e.g. Round Robin, Least Connections, Weighted Round Robin, Geo-based, etc.)
 // 2. Secure. No taking arbitrary strings as input. Protection against Ddos with optional rate-limiting, IP whitelisting.
@@ -38,32 +51,6 @@ impl Source {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Backend {
-    url: SocketAddr,
-    request_limit_per_second: u64,
-    whitelist: Option<Vec<IpAddr>>,
-    blacklist: Option<Vec<IpAddr>>,
-    served_requests: u64,
-}
-
-impl Backend {
-    pub fn new(url: impl ToSocketAddrs) -> Result<Backend> {    
-
-        if let Ok(socket_addr) = url.to_socket_addrs() {
-            Ok(Self {
-                url: socket_addr,
-                request_limit_per_second: 10,
-                whitelist: None,
-                blacklist: None,
-                served_requests: 0,
-            })
-        }
- 
-    }
-}
-
-
 #[derive(Debug, Clone, Copy)]
 enum Strategy {
     RoundRobin,
@@ -73,54 +60,45 @@ enum Strategy {
 }
 
 
-pub trait Selector {
-    fn select_service(&mut self, backends: &Vec<Backend>) -> usize;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RoundRobinSelector {
-    last_idx: usize
-}
-
-impl RoundRobinSelector {
-    pub fn new() -> RoundRobinSelector {
-        Self {
-            last_idx: 0
-        }
-    }
-}
-
-
-impl Selector for RoundRobinSelector {
-    fn select_service(&mut self, backends: &Vec<Backend>) -> usize {
-        if self.last_idx >= backends.len() - 1 {
-            self.last_idx = 0;
-            return 0;
-        }
-
-        self.last_idx += 1;
-
-        return self.last_idx
-    }
-}
-
 
 #[derive(Debug, Clone)]
 struct LoadBalancer<T>
 where 
     T: Clone + std::fmt::Debug + Send,
-    T: Selector
+    T: selectors::Selector
 {
     services: Vec<Backend>,
+    whitelist: Option<Vec<IpAddr>>,
+    blacklist: Option<Vec<IpAddr>>,
     selector: T,
     session_requests: u64,
 }
 
 impl<T> LoadBalancer<T> 
 where 
-    T: Clone + std::fmt::Debug + Send,
+    T: Clone + std::fmt::Debug + Send + Default,
     T: Selector
 {
+
+    pub fn new() -> LoadBalancer<T> {
+        Self {
+            services: vec![],
+            whitelist: None,
+            blacklist: None,
+            selector: T::default(),
+            session_requests: 0
+        }
+    }
+
+    pub fn with_backends(services: Vec<Backend>) -> LoadBalancer<T> {
+        Self {
+            services,
+            whitelist: None,
+            blacklist: None,
+            selector: T::default(),
+            session_requests: 0
+        }
+    }
 
     fn increment_session_requests(&mut self) {
         self.session_requests += 1
@@ -134,54 +112,113 @@ where
        self.selector.select_service(&self.services)
     }
 
-    pub fn serve_request(&mut self, stream: &TcpStream) {
-        if let Ok(addr) = stream.peer_addr() {
-            let source = Source::new(addr.ip());
+    pub fn serve_request(&mut self, client_stream: &mut TcpStream) -> Result<(), io::Error> {
+        if let Ok(addr) = client_stream.peer_addr() {
+            let client_ip = addr.ip();
+            
+            if let Some(blacklist) = &self.blacklist {
+                if blacklist.contains(&client_ip) {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "IP is blacklisted"));
+                }
+            }
+            
+            // Check if whitelist is enabled and IP is not in whitelist
+            if let Some(whitelist) = &self.whitelist {
+                if !whitelist.is_empty() && !whitelist.contains(&client_ip) {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "IP is not in whitelist"));
+                }
+            }
+    }
+
+    let backend_idx = self.select_backend();
+    let backend = self.services.get(backend_idx).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "No backend available")
+    })?;
+
+    let mut server_stream = TcpStream::connect(&backend.uri.to_string())?;
+    
+    // Set reasonable timeouts
+    client_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    client_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    server_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    server_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+    // Buffer for data transfer
+    let mut buffer = [0; 8192]; // 8KB buffer
+    
+    client_stream.set_nonblocking(true)?;
+    server_stream.set_nonblocking(true)?;
+    
+    let mut client_closed = false;
+    let mut server_closed = false;
+    
+    // Proxy loop
+    while !client_closed && !server_closed {
+
+        // Client -> Server
+        if !client_closed {
+            match client_stream.read(&mut buffer) {
+                Ok(0) => {
+                    // Client closed connection
+                    client_closed = true;
+                    server_stream.shutdown(std::net::Shutdown::Write)?;
+                },
+                Ok(n) => {
+                    // Forward data to server
+                    match server_stream.write_all(&buffer[0..n]) {
+                        Ok(_) => {
+                            // Successful write to server
+                            self.increment_session_requests();
+                        },
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            continue;
+                        },
+                        Err(e) => return Err(e),
+                    }
+                },
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No data available, continue
+                },
+                Err(e) => return Err(e),
+            }
         }
 
-        let backend_idx = self.select_backend();
-        if let Some(backend) = self.services.get(backend_idx) {
-            let server_conn = TcpStream::connect(backend.)
+        // Server -> Client
+        if !server_closed {
+            match server_stream.read(&mut buffer) {
+                Ok(0) => {
+                    // Server closed connection
+                    server_closed = true;
+                    client_stream.shutdown(std::net::Shutdown::Write)?;
+                },
+                Ok(n) => {
+                    // Forward data to client
+                    match client_stream.write_all(&buffer[0..n]) {
+                        Ok(_) => {
+                            // Successful write to client
+                        },
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // Would block, try again later
+                            continue;
+                        },
+                        Err(e) => return Err(e),
+                    }
+                },
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No data available, continue
+                },
+                Err(e) => return Err(e),
+            }
         }
-
-
+        
+        // Small sleep to avoid CPU spin
+        // std::thread::sleep(Duration::from_millis(1));
     }
+
+    Ok(())
+}
 }
 
-#[derive(Default)]
-struct LoadBalancerBuilder {
-    balancer_strategy: Option<Strategy>,
-    backends: Vec<Backend>,
-}
-
-impl LoadBalancerBuilder {
-    pub fn new() -> LoadBalancerBuilder {
-        Self {
-            balancer_strategy: None,
-            backends: vec![],
-        } 
-    }
-
-    pub fn with_service(&mut self, service: Backend) -> &Self {
-        self.backends.push(service);
-
-        self
-    }
-
-    pub fn with_strategy(&mut self, strategy: Strategy) -> &Self {
-        self.balancer_strategy = Some(strategy);
-
-        self 
-    }
-
-    pub fn build(&self) -> LoadBalancer {   
-        LoadBalancer {
-            services: self.backends.clone(),
-            strategy: self.balancer_strategy.unwrap_or(Strategy::RoundRobin),
-            session_requests: 0,
-        }
-    }
-}
 
 
 #[derive(Debug, Clone)]
@@ -194,36 +231,57 @@ enum LogLevel {
 #[derive(clap::Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    listener_addr: SocketAddr,
+    #[arg(long)]
+    listener_addr: String,
+
+    #[arg(long)]
     port: u16,
+
+    #[arg(long)]
     worker_threads: usize
     // log_level: LogLevel
 }
 
 
+
 fn main() -> Result<(), io::Error> {
 
-
-    let listener = TcpListener::bind("127.0.0.1:7878")?;
-
     let args = Args::parse();
+    let listener = TcpListener::bind(format!("{}:{}", args.listener_addr, args.port))?;
+
+    println!("Jalb balancer is listening on {:?}", listener.local_addr().unwrap());
 
     let pool = pool::ThreadPool::new(args.worker_threads);
 
-    let balancer = LoadBalancerBuilder::default()
-        .with_strategy(Strategy::RoundRobin)
-        // .with_service()
-        .build();
+    let backends = vec![
+        Backend::new("127.0.0.1:3001").unwrap(),
+        Backend::new("127.0.0.1:3002").unwrap(),
+        Backend::new("127.0.0.1:3003").unwrap(),
+        Backend::new("127.0.0.1:3004").unwrap(),
+        Backend::new("127.0.0.1:3005").unwrap(),
+        Backend::new("127.0.0.1:3006").unwrap(),
+        Backend::new("127.0.0.1:3007").unwrap(),
+        Backend::new("127.0.0.1:3008").unwrap(),
+        Backend::new("127.0.0.1:3009").unwrap(),
+        Backend::new("127.0.0.1:3010").unwrap(),
+    ];
+
+    let balancer = LoadBalancer::<RoundRobinSelector>::with_backends(backends);
 
     let balancer = Arc::new(Mutex::new(balancer));
 
-    for stream in listener.incoming().take(2) {
+    for tcp_stream in listener.incoming()  {
         let balancer = Arc::clone(&balancer);
-
-        if let Ok(stream) = stream {
+        info!("inc request");
+        match tcp_stream {
+            Ok(mut stream) => {
             pool.execute(move || {
-                balancer.lock().unwrap().serve_request(&stream);
+                let _ = balancer.lock().unwrap().serve_request(&mut stream);
             });
+            },
+            Err(e) => {
+                error!("{:?}", e)
+            }
         }
     }
 
