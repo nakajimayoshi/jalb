@@ -1,10 +1,4 @@
-use std::{
-    fmt::{Debug, Display},
-    io::{self, Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt::Debug, io, net::IpAddr, sync::Arc};
 
 use tokio::{
     self,
@@ -20,7 +14,6 @@ use log::{error, info};
 
 mod backend;
 mod config;
-mod pool;
 mod selectors;
 mod tests;
 
@@ -247,18 +240,15 @@ struct Args {
     worker_threads: usize, // log_level: LogLevel
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> Result<(), io::Error> {
     let args = Args::parse();
-    let mut listener =
+    let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", args.listener_addr, args.port)).await?;
 
-    println!(
-        "Jalb balancer is listening on {:?}",
-        listener.local_addr().unwrap()
-    );
+    let listener_addr = listener.local_addr()?;
 
-    // let pool = pool::ThreadPool::new(args.worker_threads);
+    info!("Jalb balancer is listening on {:?}", listener_addr);
 
     let backends = vec![
         Backend::new("127.0.0.1:3001").unwrap(),
@@ -280,10 +270,7 @@ async fn main() -> Result<(), io::Error> {
         let balancer_clone = Arc::clone(&balancer);
         tokio::spawn(async move {
             let mut balancer = balancer_clone.lock().await;
-            balancer
-                .serve_request(&mut stream)
-                .await
-                .unwrap();
+            balancer.serve_request(&mut stream).await.unwrap();
         });
     }
 

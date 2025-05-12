@@ -9,7 +9,6 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(addrs: &str) -> Result<Backend, InvalidUri> {
-
         let uri = addrs.parse::<http::Uri>()?;
 
         Ok(Self {
@@ -17,6 +16,5 @@ impl Backend {
             request_limit_per_second: 10,
             served_requests: 0,
         })
-
     }
 }

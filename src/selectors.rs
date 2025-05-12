@@ -6,14 +6,12 @@ pub trait Selector {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RoundRobinSelector {
-    last_idx: usize
+    last_idx: usize,
 }
 
 impl RoundRobinSelector {
     pub fn new() -> RoundRobinSelector {
-        Self {
-            last_idx: 0
-        }
+        Self { last_idx: 0 }
     }
 }
 
@@ -23,21 +21,19 @@ impl Default for RoundRobinSelector {
     }
 }
 
-
 impl Selector for RoundRobinSelector {
     fn select_service(&mut self, backends: &Vec<Backend>) -> usize {
         if backends.is_empty() {
             return 0;
         }
-        
+
         let current = self.last_idx;
-        
+
         self.last_idx = (self.last_idx + 1) % backends.len();
-        
+
         current
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -45,20 +41,16 @@ mod tests {
 
     use super::{RoundRobinSelector, Selector};
 
-
     #[test]
     fn should_select_next() {
         let mut selector = RoundRobinSelector::new();
-        
 
         let backends = vec![
             Backend::new("127.0.0.1:3000").unwrap(),
             Backend::new("127.0.0.1:3002").unwrap(),
-            Backend::new("127.0.0.1:3003").unwrap(), 
+            Backend::new("127.0.0.1:3003").unwrap(),
             Backend::new("127.0.0.1:3004").unwrap(),
         ];
-
-        
 
         assert_eq!(selector.select_service(&backends), 0);
         assert_eq!(selector.select_service(&backends), 1);

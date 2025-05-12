@@ -1,6 +1,2 @@
-
-
 #[cfg(test)]
-fn test() {
-    
-}
+fn test() {}
