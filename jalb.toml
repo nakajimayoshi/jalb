@@ -1,13 +1,10 @@
 
 [backends]
 auth = [
-    { region = "Asia", rate_limit = 400, url = "https://auth.ap-northeast-1.service.com/v1" }
+    { region = "Asia", rate_limit = 400, url = "" }
 ]
 
+whitelist = [
+    "127.0.0.1"
+]
 
-[backends.whitelist]
-origins = { ip = "127.0.0.1", region="Japan" }
-
-
-[responses]
-too-many-requests = { code = 401, detail= "request frequency exceeds server limit, please try again later" }

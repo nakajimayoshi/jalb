@@ -1,21 +1,28 @@
-use std::{fmt::{Debug, Display}, io::{self, Read, Write}, 
+use std::{
+    fmt::{Debug, Display},
+    io::{self, Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
-use clap::{self, builder::Str, Parser};
-use isocountry::CountryCode;
+use tokio::{
+    self,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
+
 use backend::Backend;
+use clap::{self, Parser, builder::Str};
+use isocountry::CountryCode;
 use selectors::{RoundRobinSelector, Selector};
 
 use log::{error, info};
 
 mod backend;
+mod config;
 mod pool;
 mod selectors;
 mod tests;
-
 
 // make a load balancer with the following requirements:
 // 1. Multi-strategy (e.g. Round Robin, Least Connections, Weighted Round Robin, Geo-based, etc.)
@@ -32,17 +39,15 @@ enum Region {
     Oceania(CountryCode),
     NorthAmerica(CountryCode),
     SouthAmerica(CountryCode),
-    Unknown
+    Unknown,
 }
-
 
 struct Source {
     ip_addr: IpAddr,
-    region: Option<Region>
+    region: Option<Region>,
 }
 
 impl Source {
-
     pub fn new(ip_addr: IpAddr) -> Source {
         Self {
             ip_addr,
@@ -56,16 +61,14 @@ enum Strategy {
     RoundRobin,
     LeastConnections,
     WeightedRoundRobin,
-    Geospatial
+    Geospatial,
 }
-
-
 
 #[derive(Debug, Clone)]
 struct LoadBalancer<T>
-where 
+where
     T: Clone + std::fmt::Debug + Send,
-    T: selectors::Selector
+    T: selectors::Selector,
 {
     services: Vec<Backend>,
     whitelist: Option<Vec<IpAddr>>,
@@ -74,19 +77,18 @@ where
     session_requests: u64,
 }
 
-impl<T> LoadBalancer<T> 
-where 
+impl<T> LoadBalancer<T>
+where
     T: Clone + std::fmt::Debug + Send + Default,
-    T: Selector
+    T: Selector,
 {
-
     pub fn new() -> LoadBalancer<T> {
         Self {
             services: vec![],
             whitelist: None,
             blacklist: None,
             selector: T::default(),
-            session_requests: 0
+            session_requests: 0,
         }
     }
 
@@ -96,7 +98,7 @@ where
             whitelist: None,
             blacklist: None,
             selector: T::default(),
-            session_requests: 0
+            session_requests: 0,
         }
     }
 
@@ -109,123 +111,127 @@ where
     }
 
     fn select_backend(&mut self) -> usize {
-       self.selector.select_service(&self.services)
+        self.selector.select_service(&self.services)
     }
 
-    pub fn serve_request(&mut self, client_stream: &mut TcpStream) -> Result<(), io::Error> {
+    pub async fn serve_request(
+        &mut self,
+        client_stream: &mut tokio::net::TcpStream,
+    ) -> Result<(), io::Error> {
         if let Ok(addr) = client_stream.peer_addr() {
             let client_ip = addr.ip();
-            
+
             if let Some(blacklist) = &self.blacklist {
                 if blacklist.contains(&client_ip) {
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "IP is blacklisted"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "IP is blacklisted",
+                    ));
                 }
             }
-            
+
             // Check if whitelist is enabled and IP is not in whitelist
             if let Some(whitelist) = &self.whitelist {
                 if !whitelist.is_empty() && !whitelist.contains(&client_ip) {
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "IP is not in whitelist"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "IP is not in whitelist",
+                    ));
                 }
             }
-    }
-
-    let backend_idx = self.select_backend();
-    let backend = self.services.get(backend_idx).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "No backend available")
-    })?;
-
-    let mut server_stream = TcpStream::connect(&backend.uri.to_string())?;
-    
-    // Set reasonable timeouts
-    client_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    client_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    server_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    server_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-
-    // Buffer for data transfer
-    let mut buffer = [0; 8192]; // 8KB buffer
-    
-    client_stream.set_nonblocking(true)?;
-    server_stream.set_nonblocking(true)?;
-    
-    let mut client_closed = false;
-    let mut server_closed = false;
-    
-    // Proxy loop
-    while !client_closed && !server_closed {
-
-        // Client -> Server
-        if !client_closed {
-            match client_stream.read(&mut buffer) {
-                Ok(0) => {
-                    // Client closed connection
-                    client_closed = true;
-                    server_stream.shutdown(std::net::Shutdown::Write)?;
-                },
-                Ok(n) => {
-                    // Forward data to server
-                    match server_stream.write_all(&buffer[0..n]) {
-                        Ok(_) => {
-                            // Successful write to server
-                            self.increment_session_requests();
-                        },
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            continue;
-                        },
-                        Err(e) => return Err(e),
-                    }
-                },
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // No data available, continue
-                },
-                Err(e) => return Err(e),
-            }
         }
 
-        // Server -> Client
-        if !server_closed {
-            match server_stream.read(&mut buffer) {
-                Ok(0) => {
-                    // Server closed connection
-                    server_closed = true;
-                    client_stream.shutdown(std::net::Shutdown::Write)?;
-                },
-                Ok(n) => {
-                    // Forward data to client
-                    match client_stream.write_all(&buffer[0..n]) {
-                        Ok(_) => {
-                            // Successful write to client
-                        },
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            // Would block, try again later
-                            continue;
-                        },
-                        Err(e) => return Err(e),
+        let backend_idx = self.select_backend();
+        let backend = self
+            .services
+            .get(backend_idx)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No backend available"))?;
+
+        let mut server_stream = tokio::net::TcpStream::connect(&backend.uri.to_string()).await?;
+
+        // Set reasonable timeouts
+        // client_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        // client_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        // server_stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        // server_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+        // Buffer for data transfer
+        let mut buffer = [0; 8192]; // 8KB buffer
+
+        let mut client_closed = false;
+        let mut server_closed = false;
+
+        // Proxy loop
+        while !client_closed && !server_closed {
+            // Client -> Server
+            if !client_closed {
+                match client_stream.read(&mut buffer).await {
+                    Ok(0) => {
+                        // Client closed connection
+                        client_closed = true;
+                        server_stream.shutdown().await?;
                     }
-                },
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // No data available, continue
-                },
-                Err(e) => return Err(e),
+                    Ok(n) => {
+                        // Forward data to server
+                        match server_stream.write_all(&buffer[0..n]).await {
+                            Ok(_) => {
+                                // Successful write to server
+                                self.increment_session_requests();
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No data available, continue
+                    }
+                    Err(e) => return Err(e),
+                }
             }
+
+            // Server -> Client
+            if !server_closed {
+                match server_stream.read(&mut buffer).await {
+                    Ok(0) => {
+                        // Server closed connection
+                        server_closed = true;
+                        client_stream.shutdown().await?;
+                    }
+                    Ok(n) => {
+                        // Forward data to client
+                        match client_stream.write_all(&buffer[0..n]).await {
+                            Ok(_) => {
+                                // Successful write to client
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                // Would block, try again later
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No data available, continue
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // Small sleep to avoid CPU spin
+            // std::thread::sleep(Duration::from_millis(1));
         }
-        
-        // Small sleep to avoid CPU spin
-        // std::thread::sleep(Duration::from_millis(1));
+
+        Ok(())
     }
-
-    Ok(())
 }
-}
-
-
 
 #[derive(Debug, Clone)]
 enum LogLevel {
     Error,
     Warning,
-    Debug
+    Debug,
 }
 
 #[derive(clap::Parser)]
@@ -238,20 +244,21 @@ struct Args {
     port: u16,
 
     #[arg(long)]
-    worker_threads: usize
-    // log_level: LogLevel
+    worker_threads: usize, // log_level: LogLevel
 }
 
-
-
-fn main() -> Result<(), io::Error> {
-
+#[tokio::main]
+async fn main() -> Result<(), io::Error> {
     let args = Args::parse();
-    let listener = TcpListener::bind(format!("{}:{}", args.listener_addr, args.port))?;
+    let mut listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", args.listener_addr, args.port)).await?;
 
-    println!("Jalb balancer is listening on {:?}", listener.local_addr().unwrap());
+    println!(
+        "Jalb balancer is listening on {:?}",
+        listener.local_addr().unwrap()
+    );
 
-    let pool = pool::ThreadPool::new(args.worker_threads);
+    // let pool = pool::ThreadPool::new(args.worker_threads);
 
     let backends = vec![
         Backend::new("127.0.0.1:3001").unwrap(),
@@ -267,24 +274,18 @@ fn main() -> Result<(), io::Error> {
     ];
 
     let balancer = LoadBalancer::<RoundRobinSelector>::with_backends(backends);
+    let balancer = Arc::new(tokio::sync::Mutex::new(balancer));
 
-    let balancer = Arc::new(Mutex::new(balancer));
-
-    for tcp_stream in listener.incoming()  {
-        let balancer = Arc::clone(&balancer);
-        info!("inc request");
-        match tcp_stream {
-            Ok(mut stream) => {
-            pool.execute(move || {
-                let _ = balancer.lock().unwrap().serve_request(&mut stream);
-            });
-            },
-            Err(e) => {
-                error!("{:?}", e)
-            }
-        }
+    while let Ok((mut stream, _addr)) = listener.accept().await {
+        let balancer_clone = Arc::clone(&balancer);
+        tokio::spawn(async move {
+            let mut balancer = balancer_clone.lock().await;
+            balancer
+                .serve_request(&mut stream)
+                .await
+                .unwrap();
+        });
     }
 
     Ok(())
 }
-
