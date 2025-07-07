@@ -1,5 +1,5 @@
+use std::io;
 use thiserror;
-use std::{io};
 use toml;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,20 +19,11 @@ pub enum LoadBalancerError {
     #[error("failed to connect to backend")]
     IOError(#[from] io::Error),
     #[error("failed to open tcp socket")]
-    SocketOpenError(String)
-}
-
-
-#[derive(Debug, thiserror::Error)]
-pub enum CoordinateError {
-    #[error("invalid latitude specified. Must be between -90 and 90. Found {0}")]
-    InvalidLatitude(f32),
-    #[error("invalid longitude specified. Must be between -180 and 180. Found {0}")]
-    InvalidLongitude(f32)
+    SocketOpenError(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkTargetError {
     #[error("The provided string cannot be parsed as either a url or socket address {0}")]
-    InvalidTargetError(String)
+    InvalidTargetError(String),
 }

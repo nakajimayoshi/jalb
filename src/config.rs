@@ -1,4 +1,4 @@
-use crate::peer::{HashableCoord, Peer};
+use crate::peer::Peer;
 use log;
 use serde::Deserialize;
 use std::hash::{Hash, Hasher};
@@ -10,7 +10,7 @@ use std::{default, fs};
 use toml;
 use url::Url;
 
-use crate::errors::{CoordinateError, JalbConfigError, NetworkTargetError};
+use crate::errors::{JalbConfigError, NetworkTargetError};
 use crate::security::Security;
 
 const LOG_FILE_SIZE_HARD_LIMIT_MB: usize = 10;
@@ -160,7 +160,7 @@ impl Hash for NetworkTarget {
 pub struct NodeOptions {
     address: NetworkTarget,
     weight: Option<u32>,
-    coordinates: Option<[f32; 2]>,
+    coordinates: Option<geo::Coord>,
 }
 
 impl NodeOptions {
@@ -172,16 +172,8 @@ impl NodeOptions {
         self.weight
     }
 
-    pub fn get_coordinates(&self) -> Option<HashableCoord> {
-        if let Some(coordinates) = self.coordinates {
-            if let Ok(coord) = HashableCoord::new(coordinates[0], coordinates[1]) {
-                return Some(coord);
-            }
-
-            return None;
-        }
-
-        None
+    pub fn get_coordinates(&self) -> Option<geo::Coord> {
+        self.coordinates
     }
 }
 

@@ -1,17 +1,15 @@
-use crate::{
-    config::{NetworkTarget, NodeOptions},
-    errors::NetworkTargetError,
-};
-use geo::Coord;
+use geo;
 use log::error;
-use ordered_float::OrderedFloat;
 use std::{io, str::FromStr, time::Duration};
 use tokio::{
     net::{TcpSocket, TcpStream},
     time::timeout,
 };
 
-use crate::errors::CoordinateError;
+use crate::{
+    config::{NetworkTarget, NodeOptions},
+    errors::NetworkTargetError,
+};
 
 fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::Error> {
     if addr.is_ipv4() {
@@ -21,36 +19,12 @@ fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::
     TcpSocket::new_v6()
 }
 
-#[derive(Debug, Hash)]
-pub struct HashableCoord {
-    inner: Coord<OrderedFloat<f32>>,
-}
-
-impl HashableCoord {
-    pub fn new(latitude: f32, longitude: f32) -> Result<Self, CoordinateError> {
-        if latitude.abs() > 90.0 {
-            return Err(CoordinateError::InvalidLatitude(latitude));
-        }
-
-        if longitude.abs() > 180.0 {
-            return Err(CoordinateError::InvalidLongitude(longitude));
-        }
-
-        Ok(Self {
-            inner: Coord {
-                x: OrderedFloat(latitude),
-                y: OrderedFloat(longitude),
-            },
-        })
-    }
-}
-
 #[derive(Debug)]
 pub struct Peer {
     pub healthy: bool,
     pub address: NetworkTarget,
     pub weight: u32,
-    pub coordinates: Option<HashableCoord>,
+    pub coordinates: Option<geo::Coord>,
 }
 
 impl Peer {
