@@ -1,38 +1,21 @@
-use crate::LoadBalancerError;
-use clap::error;
-use core::time;
-use geo::Coord;
+use crate::peer::{HashableCoord, Peer};
 use log;
-use log::error;
 use serde::Deserialize;
 use std::fs;
-use std::io;
-use std::net::Ipv4Addr;
-use std::net::{AddrParseError, IpAddr};
+use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::str::FromStr;
-use tokio::net::TcpSocket;
-use tokio::net::TcpStream;
-use tokio::time::timeout;
+use std::time;
 use toml;
 use url::Url;
+
+use crate::errors::{CoordinateError, JalbConfigError, NetworkTargetError};
+use crate::security::Security;
 
 const VALID_VERSION_STRS: [&str; 1] = ["1"];
 
 const LOG_FILE_SIZE_HARD_LIMIT_MB: usize = 10;
-
-#[derive(Debug, thiserror::Error)]
-pub enum JalbConfigError {
-    #[error("could not open config file")]
-    FileIOError(#[from] io::Error),
-    #[error("failed to deserialize from config file")]
-    DeserializationError(#[from] toml::de::Error),
-    #[error("the provided address was neither a valid url or socket address {0}")]
-    InvalidNetworkTarget(String),
-    #[error("unknown load balancer strategy specified {0}")]
-    UnknownLoadBalancerStrategy(String),
-    #[error("unknown jalb config version specified {0}. Valid versions are {1}")]
-    UnknownConfigVersion(String, String),
-}
 
 #[derive(Debug, Deserialize)]
 enum JalbConfigVersion {
@@ -77,42 +60,86 @@ struct LoadBalancerConfig {
     max_requests_per_connection: u32,
 }
 
-#[derive(Debug, Deserialize)]
-struct SecurityConfig {
-    ip_whitelist: Vec<String>,
-    ip_blacklist: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct BackendOptions {
     pub name: String,
-    pub health_endpoint: Option<String>,
-    pub health_check_interval_seconds: Option<u32>,
-    pub health_check_timeout_seconds: Option<u32>,
+    health_endpoint: Option<NetworkTarget>,
+    health_check_interval_seconds: Option<u32>,
+    health_check_timeout_seconds: Option<u32>,
     pub failed_request_threshold: Option<u32>,
-    pub request_timeout_seconds: Option<u32>,
+    request_timeout_seconds: Option<u32>,
     pub rate_limit: Option<u64>,
-    pub nodes: Vec<Node>,
+    pub node_options: Vec<NodeOptions>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-enum NetworkTarget {
+impl BackendOptions {
+    pub fn get_health_check_interval(&self) -> Option<time::Duration> {
+        if let Some(interval) = self.health_check_interval_seconds {
+            return Some(time::Duration::from_secs(interval.into()));
+        }
+
+        None
+    }
+
+    pub fn get_health_check_timeout(&self) -> Option<time::Duration> {
+        if let Some(timeout) = self.health_check_timeout_seconds {
+            return Some(time::Duration::from_secs(timeout.into()));
+        }
+
+        None
+    }
+
+    pub fn get_request_timeout(&self) -> Option<time::Duration> {
+        if let Some(timeout) = self.health_check_timeout_seconds {
+            return Some(time::Duration::from_secs(timeout.into()));
+        }
+
+        None
+    }
+
+    pub fn nodes(&self) -> Vec<Peer> {
+        let mut nodes = Vec::new();
+        for option in self.node_options.as_slice() {
+            nodes.push(Peer::from_config(&option));
+        }
+
+        nodes
+    }
+
+    pub fn get_health_endpoint(&self) -> Option<NetworkTarget> {
+        self.health_endpoint.clone()
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub enum NetworkTarget {
     Url(url::Url),
     SocketAddr(std::net::SocketAddr),
 }
 
 impl NetworkTarget {
-    fn as_string(&self) -> String {
+    pub fn as_string(&self) -> String {
         match self {
             Self::SocketAddr(addr) => addr.to_string(),
             Self::Url(url) => url.to_string(),
         }
     }
+
+    pub fn to_socket_addrs(&self) -> Option<&SocketAddr> {
+        match self {
+            Self::SocketAddr(addr) => Some(addr),
+            Self::Url(url) => {
+                if let Some(port) = url.port_or_known_default() {}
+
+                None
+            }
+        }
+    }
 }
 
 impl FromStr for NetworkTarget {
-    type Err = JalbConfigError;
-    fn from_str(s: &str) -> Result<Self, JalbConfigError> {
+    type Err = NetworkTargetError;
+    fn from_str(s: &str) -> Result<Self, NetworkTargetError> {
         type Err = JalbConfigError;
 
         if let Ok(url) = Url::parse(s) {
@@ -123,72 +150,27 @@ impl FromStr for NetworkTarget {
             return Ok(Self::SocketAddr(socket_addr));
         }
 
-        Err(JalbConfigError::InvalidNetworkTarget(s.to_string()))
+        Err(NetworkTargetError::InvalidTargetError(s.to_string()))
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Node {
+impl Hash for NetworkTarget {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            NetworkTarget::SocketAddr(socket_addr) => socket_addr.hash(state),
+            NetworkTarget::Url(url) => url.hash(state),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NodeOptions {
     address: NetworkTarget,
     weight: Option<u32>,
     coordinates: Option<[f32; 2]>,
 }
 
-fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::Error> {
-    if addr.is_ipv4() {
-        return TcpSocket::new_v4();
-    }
-
-    return TcpSocket::new_v6();
-}
-
-impl Node {
-    async fn get_health_tcp(&self, connect_timeout: time::Duration) -> Result<bool, io::Error> {
-        match self.address {
-            NetworkTarget::SocketAddr(socket_addr) => {
-                let socket = tcpsocket_from_address(&socket_addr)?;
-
-                let future = socket.connect(socket_addr);
-                match timeout(connect_timeout, future).await {
-                    Ok(Ok(stream)) => return Ok(true),
-                    Ok(Err(e)) => {
-                        error!("health check for {} failed: {}", socket_addr, e);
-                        return Err(e);
-                    }
-                    Err(_) => {
-                        error!(
-                            "tcp health check for {} timed out after {:?}",
-                            socket_addr, connect_timeout
-                        );
-                        return Ok(false);
-                    }
-                }
-            }
-            NetworkTarget::Url(ref url) => {
-                let future = TcpStream::connect(url.to_string());
-                match timeout(connect_timeout, future).await {
-                    Ok(Ok(stream)) => return Ok(true),
-                    Ok(Err(e)) => {
-                        error!("health check for {} failed: {}", url.as_str(), e);
-                        return Err(e);
-                    }
-                    Err(_) => {
-                        error!(
-                            "tcp health check for {} timed out after {:?}",
-                            url.as_str(),
-                            connect_timeout
-                        );
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-
-        Ok(false)
-    }
-}
-
-impl Node {
+impl NodeOptions {
     pub fn get_addr(&self) -> NetworkTarget {
         self.address.clone()
     }
@@ -197,17 +179,36 @@ impl Node {
         self.weight
     }
 
-    pub fn get_coordinates(&self) -> Option<Coord<f32>> {
+    pub fn get_coordinates(&self) -> Option<HashableCoord> {
         if let Some(coordinates) = self.coordinates {
-            return Some(Coord {
-                x: coordinates[0],
-                y: coordinates[1],
-            });
+            if let Ok(coord) = HashableCoord::new(coordinates[0], coordinates[1]) {
+                return Some(coord);
+            }
+
+            return None;
         }
 
         None
     }
 }
+
+impl Hash for NodeOptions {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
+    }
+}
+
+impl PartialEq for NodeOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.address.as_string() == other.address.as_string()
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.address.as_string() != other.address.as_string()
+    }
+}
+
+impl Eq for NodeOptions {}
 
 #[derive(Debug, Deserialize)]
 struct LoggingConfig {
@@ -236,17 +237,15 @@ pub struct JalbConfig {
     loadbalancer: LoadBalancerConfig,
     #[serde(default)]
     logging: LoggingConfig,
-    security: SecurityConfig,
+    security: Security,
     backends: Vec<BackendOptions>,
 }
 
 impl JalbConfig {
-    pub fn load_from_config_file(path: &str) -> Result<JalbConfig, JalbConfigError> {
+    pub fn load_from_file(path: &str) -> Result<JalbConfig, JalbConfigError> {
         let toml_str = fs::read_to_string(path)?;
 
-        let mut config = toml::from_str::<JalbConfig>(&toml_str)?;
-
-        println!("{:#?}", config);
+        let config = toml::from_str::<JalbConfig>(&toml_str)?;
 
         Ok(config)
     }
@@ -259,10 +258,21 @@ impl JalbConfig {
         self.loadbalancer.load_balancer_type
     }
 
-    pub fn listener_address(&self) -> IpAddr {
+    pub fn ip(&self) -> IpAddr {
         self.loadbalancer
             .listener_address
             .unwrap_or(IpAddr::from_str("127.0.0.1").unwrap())
+    }
+
+    pub fn port(&self) -> u16 {
+        self.loadbalancer.port.unwrap_or(9220)
+    }
+
+    pub fn listener_address(&self) -> std::net::SocketAddr {
+        let ip = self.ip();
+        let port = self.port();
+
+        std::net::SocketAddr::new(ip, port)
     }
 
     pub fn rotate_logs(&self) -> bool {
@@ -279,6 +289,10 @@ impl JalbConfig {
 
         LOG_FILE_SIZE_HARD_LIMIT_MB * BYTES_PER_MEGABYTE
     }
+
+    pub fn security(&self) -> Security {
+        self.security.clone()
+    }
 }
 
 #[cfg(test)]
@@ -288,11 +302,11 @@ mod tests {
 
     #[test]
     fn test_should_load_from_file() -> Result<(), JalbConfigError> {
-        let config = JalbConfig::load_from_config_file("jalb.toml")?;
+        let config = JalbConfig::load_from_file("jalb.toml")?;
         config.load_balancer_type();
         assert!(config.rotate_logs() == true);
         assert!(config.log_file_max_size() == 10485760);
-        let ip = config.listener_address();
+        let ip = config.ip();
         assert!(ip.is_ipv4());
         assert!(ip.to_string() == "127.0.0.1");
 
