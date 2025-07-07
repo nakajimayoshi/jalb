@@ -56,6 +56,17 @@ mod tests {
 
     #[test]
     fn test_round_robin() {
-        let selector = RoundRobin::default();
+        let peers = vec![
+            Peer::new("127.0.0.1:8080").unwrap(),
+            Peer::new("127.0.0.1:8081").unwrap(),
+            Peer::new("127.0.0.1:8082").unwrap(),
+            Peer::new("127.0.0.1:8083").unwrap(),
+            Peer::new("127.0.0.1:8084").unwrap(),
+            Peer::new("127.0.0.1:8085").unwrap(),
+        ];
+
+        let selector = RoundRobin::default().with_peers(peers);
+
+        let peer1 = selector.select_peer();
     }
 }

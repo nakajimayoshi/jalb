@@ -18,7 +18,7 @@ fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::
         return tokio::net::TcpSocket::new_v4();
     }
 
-    return TcpSocket::new_v6();
+    TcpSocket::new_v6()
 }
 
 #[derive(Debug, Hash)]
@@ -45,7 +45,7 @@ impl HashableCoord {
     }
 }
 
-#[derive(Debug, Hash)]
+#[derive(Debug)]
 pub struct Peer {
     pub healthy: bool,
     pub address: NetworkTarget,
@@ -82,12 +82,12 @@ impl Peer {
                 match timeout(connect_timeout, future).await {
                     Ok(Ok(_stream)) => {
                         self.healthy = true;
-                        return Ok(true);
+                        Ok(true)
                     }
                     Ok(Err(e)) => {
                         error!("health check for {} failed: {}", socket_addr, e);
                         self.healthy = false;
-                        return Err(e);
+                        Err(e)
                     }
                     Err(_) => {
                         error!(
@@ -95,7 +95,7 @@ impl Peer {
                             socket_addr, connect_timeout
                         );
                         self.healthy = false;
-                        return Ok(false);
+                        Ok(false)
                     }
                 }
             }
@@ -112,12 +112,12 @@ impl Peer {
                 match timeout(connect_timeout, future).await {
                     Ok(Ok(_stream)) => {
                         self.healthy = true;
-                        return Ok(true);
+                        Ok(true)
                     }
                     Ok(Err(e)) => {
                         error!("health check for {} failed: {}", url.as_str(), e);
                         self.healthy = false;
-                        return Err(e);
+                        Err(e)
                     }
                     Err(_) => {
                         error!(
@@ -126,22 +126,10 @@ impl Peer {
                             connect_timeout
                         );
                         self.healthy = false;
-                        return Ok(false);
+                        Ok(false)
                     }
                 }
             }
         }
     }
 }
-
-impl PartialEq for Peer {
-    fn eq(&self, other: &Self) -> bool {
-        self.address.as_string() == other.address.as_string()
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.address.as_string() != other.address.as_string()
-    }
-}
-
-impl Eq for Peer {}

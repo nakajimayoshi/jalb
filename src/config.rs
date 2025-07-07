@@ -1,32 +1,25 @@
 use crate::peer::{HashableCoord, Peer};
 use log;
 use serde::Deserialize;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time;
+use std::{default, fs};
 use toml;
 use url::Url;
 
 use crate::errors::{CoordinateError, JalbConfigError, NetworkTargetError};
 use crate::security::Security;
 
-const VALID_VERSION_STRS: [&str; 1] = ["1"];
-
 const LOG_FILE_SIZE_HARD_LIMIT_MB: usize = 10;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 enum JalbConfigVersion {
+    #[default]
     #[serde(rename = "1")]
     V1,
-}
-
-impl Default for JalbConfigVersion {
-    fn default() -> Self {
-        JalbConfigVersion::V1
-    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
