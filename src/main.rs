@@ -1,6 +1,6 @@
 use tokio::{self, net::TcpListener};
 
-use config::JalbConfig;
+use config::Config;
 
 use load_balancer::NetworkLoadBalancer;
 
@@ -35,7 +35,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = JalbConfig::load_from_file("./jalb.toml")?;
+    let cfg = Config::load_from_file("./jalb.toml")?;
 
     let listener_addr = cfg.listener_address();
     let listener = TcpListener::bind(listener_addr).await?;

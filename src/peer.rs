@@ -1,13 +1,13 @@
 use geo;
 use log::error;
-use std::{io, str::FromStr, time::Duration};
+use std::{io, net::SocketAddr, str::FromStr, time::Duration};
 use tokio::{
     net::{TcpSocket, TcpStream},
     time::timeout,
 };
 
 use crate::{
-    config::{NetworkTarget, NodeOptions},
+    config::{BackendOptions, NetworkTarget, NodeOptions},
     errors::NetworkTargetError,
 };
 
@@ -22,6 +22,7 @@ fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::
 #[derive(Debug)]
 pub struct Peer {
     pub healthy: bool,
+    pub health_endpoint: Option<NetworkTarget>,
     pub address: NetworkTarget,
     pub weight: u32,
     pub coordinates: Option<geo::Coord>,
@@ -36,19 +37,40 @@ impl Peer {
             address: target,
             weight: 1,
             coordinates: None,
+            health_endpoint: None,
         })
     }
 
-    pub(crate) fn from_config(options: &NodeOptions) -> Self {
-        Self {
+    pub(crate) fn from_config(
+        options: &NodeOptions,
+        backend_config: &BackendOptions,
+    ) -> Result<Self, NetworkTargetError> {
+        let addr = options.get_addr();
+        let mut health_addr: Option<NetworkTarget> = None;
+
+        if let Some(path) = backend_config.health_endpoint.clone() {
+            let mut base_health_addr = addr.clone();
+            health_addr = Some(base_health_addr)
+        }
+
+        Ok(Self {
             healthy: false,
-            address: options.get_addr(),
+            address: addr,
             weight: options.get_weight().unwrap_or(1),
             coordinates: options.get_coordinates(),
-        }
+            health_endpoint: health_addr,
+        })
     }
 
     pub async fn health_check(&mut self, connect_timeout: Duration) -> Result<bool, io::Error> {
+        if self.health_endpoint.is_none() {
+            let error = io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no health endpoint was configured",
+            );
+            return Err(error);
+        }
+
         match self.address {
             NetworkTarget::SocketAddr(socket_addr) => {
                 let socket = tcpsocket_from_address(&socket_addr)?;

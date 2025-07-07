@@ -7,20 +7,20 @@ use crate::peer::Peer;
 
 pub trait Selector {
     fn select_peer(&mut self) -> Option<&Peer>;
-    fn with_peers(&mut self, nodes: Vec<Peer>);
+    fn add_peer(&mut self, peer: Peer);
 }
 
 #[derive(Debug)]
 pub struct RoundRobin {
     last_idx: usize,
-    pool: HashMap<usize, Peer>,
+    pool: Vec<Peer>,
 }
 
 impl RoundRobin {
     pub fn new() -> RoundRobin {
         Self {
             last_idx: 0,
-            pool: HashMap::new(),
+            pool: Vec::new(),
         }
     }
 }
@@ -35,17 +35,15 @@ impl Selector for RoundRobin {
     fn select_peer(&mut self) -> Option<&Peer> {
         if self.last_idx == self.pool.len() {
             self.last_idx = 0;
-            return self.pool.get(&self.last_idx);
+            return self.pool.get(self.last_idx);
         }
 
         self.last_idx += 1;
-        self.pool.get(&self.last_idx)
+        self.pool.get(self.last_idx)
     }
 
-    fn with_peers(&mut self, peers: Vec<Peer>) {
-        for (i, node) in peers.into_iter().enumerate() {
-            self.pool.insert(i, node);
-        }
+    fn add_peer(&mut self, peer: Peer) {
+        self.pool.push(peer)
     }
 }
 
@@ -65,7 +63,11 @@ mod tests {
             Peer::new("127.0.0.1:8085").unwrap(),
         ];
 
-        let selector = RoundRobin::default().with_peers(peers);
+        let mut selector = RoundRobin::default();
+
+        for peer in peers {
+            selector.add_peer(peer);
+        }
 
         let peer1 = selector.select_peer();
     }

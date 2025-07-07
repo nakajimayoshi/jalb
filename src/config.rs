@@ -4,13 +4,14 @@ use serde::Deserialize;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time;
-use std::{default, fs};
+use std::{fs, io};
 use toml;
 use url::Url;
 
-use crate::errors::{JalbConfigError, NetworkTargetError};
+use crate::errors::{ConfigError, NetworkTargetError};
 use crate::security::Security;
 
 const LOG_FILE_SIZE_HARD_LIMIT_MB: usize = 10;
@@ -56,7 +57,7 @@ struct LoadBalancerConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct BackendOptions {
     pub name: String,
-    health_endpoint: Option<NetworkTarget>,
+    pub health_endpoint: Option<String>,
     health_check_interval_seconds: Option<u32>,
     health_check_timeout_seconds: Option<u32>,
     pub failed_request_threshold: Option<u32>,
@@ -91,16 +92,19 @@ impl BackendOptions {
     }
 
     pub fn nodes(&self) -> Vec<Peer> {
-        let mut nodes = Vec::new();
+        let mut peers = Vec::new();
         for option in self.node_options.as_slice() {
-            nodes.push(Peer::from_config(&option));
+            match Peer::from_config(option, self) {
+                Ok(peer) => {
+                    peers.push(peer);
+                }
+                Err(e) => {
+                    panic!("Failed to create Peer from config {:?}", e)
+                }
+            }
         }
 
-        nodes
-    }
-
-    pub fn get_health_endpoint(&self) -> Option<NetworkTarget> {
-        self.health_endpoint.clone()
+        peers
     }
 }
 
@@ -128,12 +132,41 @@ impl NetworkTarget {
             }
         }
     }
+
+    /// Appends a path segment to the NetworkTarget.
+    ///
+    /// This operation is only valid for the `Url` variant and will silently return if performed
+    /// on a SocketAddr
+    ///
+    ///
+    /// # Example
+    /// ```
+    /// let mut target = NetworkTarget::from_str("http://example.com").unwrap();
+    /// target.push("api/v1/users").unwrap();
+    /// assert_eq!(target.as_string(), "http://example.com/api/v1/users");
+    /// ```
+    pub fn push(&mut self, path: &str) -> Result<(), NetworkTargetError> {
+        // HACK: fought the borrow checker for awhile on this one. This shouldn't harm performance much
+        // unless you're constantly pushing paths during runtime.
+        let str = self.clone().as_string();
+        match self {
+            Self::Url(url) => match url.path_segments_mut() {
+                Ok(mut segments) => {
+                    segments.push(path);
+                    return Ok(());
+                }
+
+                Err(_) => Err(NetworkTargetError::InvalidUrlBase(str)),
+            },
+            Self::SocketAddr(_) => Err(NetworkTargetError::PushToSocketAddr),
+        }
+    }
 }
 
 impl FromStr for NetworkTarget {
     type Err = NetworkTargetError;
     fn from_str(s: &str) -> Result<Self, NetworkTargetError> {
-        type Err = JalbConfigError;
+        type Err = ConfigError;
 
         if let Ok(url) = Url::parse(s) {
             return Ok(NetworkTarget::Url(url));
@@ -177,60 +210,119 @@ impl NodeOptions {
     }
 }
 
-impl Hash for NodeOptions {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.address.hash(state);
+#[derive(Debug, Deserialize, Clone)]
+struct LoggingPath(PathBuf);
+
+impl LoggingPath {
+    /// Returns the conventional default path for a log file for the given program name.
+    ///
+    /// This function uses conditional compilation to provide the correct path based on
+    /// the target operating system, following platform-specific conventions.
+    ///
+    /// - **Linux**: `$XDG_DATA_HOME/jalb/logs/jalb.log` or falls back to `~/.local/share/jalb/logs/jalb.log`
+    ///
+    /// - **Windows**: C:\Users\{User}\AppData\Local\jalb\logs\jalb.log
+    ///
+    /// - **macOS**: /Users/{User}/Library/Logs/jalb/jalb.log
+    ///
+    /// Returns an `io::Error` if the user's home directory or required environment
+    /// variables cannot be found.
+    fn get_default_log_path() -> Result<PathBuf, io::Error> {
+        let mut path: PathBuf;
+
+        const PROGRAM_NAME: &'static str = "jalb";
+        // --- Windows ---
+        #[cfg(target_os = "windows")]
+        {
+            let appdata_path = env::var("LOCALAPPDATA").map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Could not find LOCALAPPDATA env var: {}", e),
+                )
+            })?;
+            path = PathBuf::from(appdata_path);
+            path.push(PROGRAM_NAME);
+        }
+
+        // --- macOS ---
+        #[cfg(target_os = "macos")]
+        {
+            use std::env;
+
+            let home_dir = env::var("HOME").map_err(|e| {
+                use std::io;
+
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Could not find HOME env var: {}", e),
+                )
+            })?;
+            path = PathBuf::from(home_dir);
+            path.push("Library/Logs");
+            path.push(PROGRAM_NAME);
+        }
+
+        // --- Linux (and other Unix-like systems) ---
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let xdg_data_home = env::var("XDG_DATA_HOME");
+            let home_dir = env::var("HOME");
+
+            let base_path_str = match xdg_data_home {
+                Ok(p) => p,
+                Err(_) => match home_dir {
+                    Ok(p) => format!("{}/.local/share", p),
+                    Err(e) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("Could not find HOME env var: {}", e),
+                        ));
+                    }
+                },
+            };
+
+            path = PathBuf::from(base_path_str);
+            path.push(PROGRAM_NAME);
+        }
+
+        let log_dir = path.join("logs");
+        fs::create_dir_all(&log_dir)?;
+
+        let log_file_name = format!("{}.log", PROGRAM_NAME);
+
+        let log_file = log_dir.join(log_file_name);
+
+        Ok(log_file)
     }
 }
 
-impl PartialEq for NodeOptions {
-    fn eq(&self, other: &Self) -> bool {
-        self.address.as_string() == other.address.as_string()
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.address.as_string() != other.address.as_string()
+impl Default for LoggingPath {
+    fn default() -> Self {
+        Self(Self::get_default_log_path().unwrap())
     }
 }
-
-impl Eq for NodeOptions {}
 
 #[derive(Debug, Deserialize)]
 struct LoggingConfig {
     log_level: Option<log::Level>,
     rotate_logs: bool,
     log_capacity_mb: Option<usize>,
-    path: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        let default_logfile_path = "./jalb_log.txt";
-
-        println!("DEFAULT INVOKED!");
-        Self {
-            log_level: Some(log::Level::Error),
-            log_capacity_mb: Some(LOG_FILE_SIZE_HARD_LIMIT_MB * 1024 * 1024),
-            rotate_logs: true,
-            path: default_logfile_path.to_string(),
-        }
-    }
+    path: Option<LoggingPath>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct JalbConfig {
+pub struct Config {
     loadbalancer: LoadBalancerConfig,
-    #[serde(default)]
     logging: LoggingConfig,
     security: Security,
     backends: Vec<BackendOptions>,
 }
 
-impl JalbConfig {
-    pub fn load_from_file(path: &str) -> Result<JalbConfig, JalbConfigError> {
+impl Config {
+    pub fn load_from_file(path: &str) -> Result<Config, ConfigError> {
         let toml_str = fs::read_to_string(path)?;
 
-        let config = toml::from_str::<JalbConfig>(&toml_str)?;
+        let config = toml::from_str::<Config>(&toml_str)?;
 
         Ok(config)
     }
@@ -278,6 +370,10 @@ impl JalbConfig {
     pub fn security(&self) -> Security {
         self.security.clone()
     }
+
+    pub fn logfile_path(&self) -> LoggingPath {
+        self.logging.path.clone().unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -286,8 +382,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_load_from_file() -> Result<(), JalbConfigError> {
-        let config = JalbConfig::load_from_file("jalb.toml")?;
+    fn test_should_load_from_file() -> Result<(), ConfigError> {
+        let config = Config::load_from_file("jalb.toml")?;
         config.load_balancer_type();
         assert!(config.rotate_logs() == true);
         assert!(config.log_file_max_size() == 10485760);

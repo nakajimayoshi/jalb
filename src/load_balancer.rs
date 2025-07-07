@@ -1,15 +1,26 @@
-use crate::{config::JalbConfig, security::Security, selector::Selector};
+use crate::{
+    backend::Backend,
+    config::{BackendOptions, Config},
+    security::Security,
+    selector::Selector,
+};
 
 pub struct NetworkLoadBalancer<T: Selector> {
     security: Security,
     selector: T,
+    backend: Backend,
 }
 
 impl<T: Selector + Default> NetworkLoadBalancer<T> {
-    pub fn new(config: &JalbConfig) -> Self {
+    pub(crate) fn new_from_config(
+        backend_config: &BackendOptions,
+        security_config: Security,
+    ) -> Self {
+        let backend = Backend::from_config(backend_config);
         Self {
-            security: config.security(),
+            security: security_config,
             selector: T::default(),
+            backend: backend,
         }
     }
 }
