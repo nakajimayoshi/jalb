@@ -3,9 +3,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::peer::Peer;
+use crate::{config::LoadBalancerConfig, peer::Peer};
 
-pub trait Selector {
+pub trait Selector: Send + Sync {
     fn select_peer(&mut self) -> Option<&Peer>;
     fn add_peer(&mut self, peer: Peer);
 }
@@ -17,7 +17,7 @@ pub struct RoundRobin {
 }
 
 impl RoundRobin {
-    pub fn new() -> RoundRobin {
+    pub fn new() -> Self {
         Self {
             last_idx: 0,
             pool: Vec::new(),
@@ -33,12 +33,12 @@ impl Default for RoundRobin {
 
 impl Selector for RoundRobin {
     fn select_peer(&mut self) -> Option<&Peer> {
-        if self.last_idx == self.pool.len() {
-            self.last_idx = 0;
-            return self.pool.get(self.last_idx);
+        if self.pool.is_empty() {
+            return None;
         }
 
-        self.last_idx += 1;
+        self.last_idx = (self.last_idx + 1) % self.pool.len();
+
         self.pool.get(self.last_idx)
     }
 

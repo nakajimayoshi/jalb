@@ -7,11 +7,11 @@ use tokio::{
 };
 
 use crate::{
-    config::{BackendOptions, NetworkTarget, NodeOptions},
+    config::{BackendOptions, NetworkTarget, PeerConfig},
     errors::NetworkTargetError,
 };
 
-fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::Error> {
+pub(crate) fn tcpsocket_from_address(addr: &std::net::SocketAddr) -> Result<TcpSocket, io::Error> {
     if addr.is_ipv4() {
         return tokio::net::TcpSocket::new_v4();
     }
@@ -42,7 +42,7 @@ impl Peer {
     }
 
     pub(crate) fn from_config(
-        options: &NodeOptions,
+        options: &PeerConfig,
         backend_config: &BackendOptions,
     ) -> Result<Self, NetworkTargetError> {
         let addr = options.get_addr();

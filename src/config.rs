@@ -1,6 +1,7 @@
 use crate::peer::Peer;
 use log;
-use serde::Deserialize;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -44,7 +45,7 @@ pub enum LoadBalancerStrategy {
 }
 
 #[derive(Debug, Deserialize)]
-struct LoadBalancerConfig {
+pub struct LoadBalancerConfig {
     #[serde(rename = "type")]
     load_balancer_type: LoadBalancerType,
     strategy: LoadBalancerStrategy,
@@ -63,7 +64,7 @@ pub struct BackendOptions {
     pub failed_request_threshold: Option<u32>,
     request_timeout_seconds: Option<u32>,
     pub rate_limit: Option<u64>,
-    pub node_options: Vec<NodeOptions>,
+    pub peers: Vec<PeerConfig>,
 }
 
 impl BackendOptions {
@@ -91,9 +92,9 @@ impl BackendOptions {
         None
     }
 
-    pub fn nodes(&self) -> Vec<Peer> {
-        let mut peers = Vec::new();
-        for option in self.node_options.as_slice() {
+    pub fn peers(&self) -> Vec<Peer> {
+        let mut peers = Vec::with_capacity(self.peers.len());
+        for option in self.peers.as_slice() {
             match Peer::from_config(option, self) {
                 Ok(peer) => {
                     peers.push(peer);
@@ -108,7 +109,7 @@ impl BackendOptions {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkTarget {
     Url(url::Url),
     SocketAddr(std::net::SocketAddr),
@@ -122,14 +123,14 @@ impl NetworkTarget {
         }
     }
 
-    pub fn to_socket_addrs(&self) -> Option<&SocketAddr> {
+    pub fn to_socket_addrs(&self) -> Option<SocketAddr> {
         match self {
-            Self::SocketAddr(addr) => Some(addr),
-            Self::Url(url) => {
-                if let Some(port) = url.port_or_known_default() {}
-
-                None
-            }
+            Self::SocketAddr(addr) => Some(*addr),
+            Self::Url(url) => url
+                .socket_addrs(|| url.port_or_known_default())
+                .ok()?
+                .into_iter()
+                .next(),
         }
     }
 
@@ -165,18 +166,23 @@ impl NetworkTarget {
 
 impl FromStr for NetworkTarget {
     type Err = NetworkTargetError;
-    fn from_str(s: &str) -> Result<Self, NetworkTargetError> {
-        type Err = ConfigError;
 
-        if let Ok(url) = Url::parse(s) {
-            return Ok(NetworkTarget::Url(url));
-        }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Url::parse(s)
+            .map(NetworkTarget::Url)
+            .or_else(|_| s.parse::<SocketAddr>().map(NetworkTarget::SocketAddr))
+            .map_err(|_| NetworkTargetError::InvalidTargetError(s.to_owned()))
+    }
+}
 
-        if let Ok(socket_addr) = s.parse::<std::net::SocketAddr>() {
-            return Ok(Self::SocketAddr(socket_addr));
-        }
+impl<'de> Deserialize<'de> for NetworkTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: String = String::deserialize(deserializer)?;
 
-        Err(NetworkTargetError::InvalidTargetError(s.to_string()))
+        s.parse().map_err(D::Error::custom)
     }
 }
 
@@ -190,13 +196,13 @@ impl Hash for NetworkTarget {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct NodeOptions {
+pub struct PeerConfig {
     address: NetworkTarget,
     weight: Option<u32>,
     coordinates: Option<geo::Coord>,
 }
 
-impl NodeOptions {
+impl PeerConfig {
     pub fn get_addr(&self) -> NetworkTarget {
         self.address.clone()
     }
@@ -227,7 +233,7 @@ impl LoggingPath {
     ///
     /// Returns an `io::Error` if the user's home directory or required environment
     /// variables cannot be found.
-    fn get_default_log_path() -> Result<PathBuf, io::Error> {
+    fn new_with_default_log_path() -> Result<Self, io::Error> {
         let mut path: PathBuf;
 
         const PROGRAM_NAME: &'static str = "jalb";
@@ -292,13 +298,17 @@ impl LoggingPath {
 
         let log_file = log_dir.join(log_file_name);
 
-        Ok(log_file)
+        Ok(Self(log_file))
     }
 }
 
 impl Default for LoggingPath {
     fn default() -> Self {
-        Self(Self::get_default_log_path().unwrap())
+        Self::new_with_default_log_path()
+        .map_err(|e| {
+            log::error!("failed to create logfile at default path {:?}", e)
+        })
+        .unwrap()
     }
 }
 
@@ -314,8 +324,8 @@ struct LoggingConfig {
 pub struct Config {
     loadbalancer: LoadBalancerConfig,
     logging: LoggingConfig,
-    security: Security,
-    backends: Vec<BackendOptions>,
+    pub security: Security,
+    pub backend: BackendOptions,
 }
 
 impl Config {
@@ -365,10 +375,6 @@ impl Config {
         }
 
         LOG_FILE_SIZE_HARD_LIMIT_MB * BYTES_PER_MEGABYTE
-    }
-
-    pub fn security(&self) -> Security {
-        self.security.clone()
     }
 
     pub fn logfile_path(&self) -> LoggingPath {

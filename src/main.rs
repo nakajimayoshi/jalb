@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use tokio::{self, net::TcpListener};
 
 use config::Config;
 
 use load_balancer::NetworkLoadBalancer;
+
+use crate::selector::RoundRobin;
 
 mod backend;
 mod config;
@@ -36,13 +40,31 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::load_from_file("./jalb.toml")?;
-
     let listener_addr = cfg.listener_address();
     let listener = TcpListener::bind(listener_addr).await?;
 
-    // let load_balancer = NetworkLoadBalancer::new::<RoundRobin>(&cfg);
+    let mut load_balancer = NetworkLoadBalancer::new_from_config(&cfg);
 
-    // while let Ok((stream, peer)) = listener.accept().await {}
+    println!(
+        "load balancer listening on {}:{}",
+        listener_addr.ip(),
+        listener_addr.port()
+    );
+
+    while let Ok((mut stream, addr)) = listener.accept().await {
+        let ip = addr.ip();
+
+        if !load_balancer.is_allowed(&ip) {
+            continue;
+        }
+
+        match load_balancer.proxy_tcp(&mut stream).await {
+            Ok(_) => {},
+            Err(e) => {
+                println!("failed to proxy peer {:?}", e)
+            }
+        }
+    }
 
     Ok(())
 }
