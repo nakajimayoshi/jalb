@@ -1,15 +1,31 @@
-use std::{io::Error, net::IpAddr};
+use std::{io::Error, net::IpAddr, os::unix::net::SocketAddr};
 
-use tokio::{io::{self, copy_bidirectional}, net::TcpStream};
 
-use crate::{
-    backend::Backend, config::{BackendOptions, Config, LoadBalancerStrategy}, peer::tcpsocket_from_address, security::Security, selector::{RoundRobin, Selector}
+pub trait TcpProxy {
+    async fn proxy_connection(&self, incoming: TcpStream, upstream: std::net::SocketAddr) -> Result<(), io::Error>;
+}
+
+use tokio::{
+    io::{self, copy_bidirectional},
+    net::TcpStream,
+    sync::oneshot,
 };
 
+use crate::{
+    backend::Backend,
+    config::{BackendOptions, Config, LoadBalancerStrategy},
+    peer::{Peer, tcpsocket_from_address},
+    security::Security,
+    selector::{RoundRobin, Selector},
+};
+
+type SelectionRequest = oneshot::Sender<Option<std::net::SocketAddr>>;
+
 pub struct NetworkLoadBalancer {
-    security: Security,
-    selector: Box<dyn Selector>,
+    pub security: Security,
+    sender: tokio::sync::mpsc::UnboundedSender<SelectionRequest>,
     backend: Backend,
+    balancer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl NetworkLoadBalancer {
@@ -24,15 +40,28 @@ impl NetworkLoadBalancer {
             _ => todo!(),
         };
 
-
         cfg.backend.peers().drain(0..).for_each(|p| {
             selector.add_peer(p);
+        });
+
+        let (request_tx, mut request_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SelectionRequest>();
+
+        let balancer_task = tokio::spawn(async move {
+            while let Some(response_tx) = request_rx.recv().await {
+                let peer_addr = selector
+                    .select_peer()
+                    .and_then(|peer| peer.address.to_socket_addrs());
+
+                let _ = response_tx.send(peer_addr);
+            }
         });
 
         Self {
             security: cfg.security.to_owned(),
             backend: backend,
-            selector: Box::new(selector),
+            sender: request_tx,
+            balancer_task: Some(balancer_task),
         }
     }
 
@@ -40,29 +69,35 @@ impl NetworkLoadBalancer {
         !self.security.is_blacklisted(ip) && self.security.is_whitelisted(ip)
     }
 
-    pub async fn proxy_tcp(&mut self, incoming: &mut TcpStream) -> Result<(), io::Error> {
+    pub async fn select_peer_address(&self) -> Option<std::net::SocketAddr> {
+        let (response_tx, response_rx) = oneshot::channel();
 
-        let peer = match self.selector.select_peer() {
-            Some(peer) => peer,
-            None => {
-                return Err(Error::new(io::ErrorKind::Other, "failed to select peer"))
-            }
-        };
+        if self.sender.send(response_tx).is_ok() {
+            return response_rx
+                .await
+                .ok()
+                .expect("failed to get response from rx channel");
+        }
 
-        println!("selected peer: {:?}", peer.address);
+        None
+    }
 
-        let outgoing_addr = match peer.address.to_socket_addrs() {
-            Some(addr) => addr,
-            None => {
-                return Err(Error::new(io::ErrorKind::Unsupported, "the peer does not have a supported L4 address"))
-            }
-        };
 
-        let socket = tcpsocket_from_address(&outgoing_addr)?;
-        let mut outgoing = socket.connect(outgoing_addr).await?;
+}
 
-        let (_, _) = copy_bidirectional(incoming, &mut outgoing).await?;
-     
+
+impl TcpProxy for NetworkLoadBalancer {
+    async fn proxy_connection(
+        &self,
+        mut incoming: TcpStream,
+        upstream: std::net::SocketAddr,
+    ) -> Result<(), io::Error> {
+
+        let socket = tcpsocket_from_address(&upstream)?;
+        let mut outgoing = socket.connect(upstream).await?;
+
+        let (_, _) = copy_bidirectional(&mut incoming, &mut outgoing).await?;
+
         Ok(())
     }
 }
