@@ -1,4 +1,10 @@
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicI32, AtomicI64, Ordering}, Arc
+    },
+    time::{Duration, Instant},
+};
 
 use tokio::{self, net::TcpListener};
 
@@ -6,7 +12,7 @@ use config::Config;
 
 use load_balancer::NetworkLoadBalancer;
 
-use crate::{load_balancer::TcpProxy};
+use crate::load_balancer::TcpProxy;
 
 mod backend;
 mod config;
@@ -36,17 +42,13 @@ struct Args {
     worker_threads: usize, // log_level: LogLevel
 }
 
-pub async fn listen_and_serve(listener: tokio::net::TcpListener, load_balancer: NetworkLoadBalancer) -> Result<(), io::Error> {
-
-    while let Ok((stream, addr)) = listener.accept().await {
-
-
-    }
-
+pub async fn listen_and_serve(
+    listener: tokio::net::TcpListener,
+    load_balancer: NetworkLoadBalancer,
+) -> Result<(), io::Error> {
+    while let Ok((stream, addr)) = listener.accept().await {}
 
     Ok(())
-
- 
 }
 
 #[tokio::main]
@@ -55,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener_addr = cfg.listener_address();
     let listener = TcpListener::bind(listener_addr).await?;
 
-    let load_balancer = Arc::new(NetworkLoadBalancer::new_from_config(&cfg));
+    let mut load_balancer = NetworkLoadBalancer::new_from_config(&cfg);
 
     println!(
         "load balancer listening on {}:{}",
@@ -63,30 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listener_addr.port()
     );
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        let ip = addr.ip();
-        let lb = Arc::clone(&load_balancer);
 
-        if !lb.is_allowed(&ip) {
-            continue;
-        }
-
-        tokio::spawn(async move {
-        match lb.select_peer_address().await {
-            Some(peer_addr) => {
-                if let Err(e) = lb.proxy_connection(stream, peer_addr).await {
-                    eprintln!("failed to proxy connection {:?}", e)
-                }
-            }
-            None => {
-                eprintln!("No healthy peers available");
-            }
-        }
-    });
-
-    }
+    load_balancer.run_forever(listener).await;
 
     Ok(())
 }
-
-

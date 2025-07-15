@@ -2,7 +2,7 @@ use geo;
 use log::error;
 use std::{io, net::SocketAddr, str::FromStr, time::Duration};
 use tokio::{
-    net::{TcpSocket, TcpStream},
+    net::{TcpSocket, TcpStream, ToSocketAddrs},
     time::timeout,
 };
 

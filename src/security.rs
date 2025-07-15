@@ -23,19 +23,19 @@ impl Security {
             return true;
         }
 
-       false 
+        false
     }
 
     pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
-          if self.ip_whitelist.is_empty() {
-            return true
-          }
+        if self.ip_whitelist.is_empty() {
+            return true;
+        }
 
-          if self.ip_whitelist.contains(ip) {
-            return true
-          }
+        if self.ip_whitelist.contains(ip) {
+            return true;
+        }
 
-          false
+        false
     }
 
     pub fn add_to_whitelist(&mut self, ip: IpAddr) {
@@ -52,6 +52,12 @@ impl Security {
 
     pub fn remove_from_blacklist(&mut self, ip: &IpAddr) {
         self.ip_blacklist.remove(ip);
+    }
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

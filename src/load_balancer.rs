@@ -1,30 +1,28 @@
-use std::{io::Error, net::IpAddr, os::unix::net::SocketAddr};
-
-
-pub trait TcpProxy {
-    async fn proxy_connection(&self, incoming: TcpStream, upstream: std::net::SocketAddr) -> Result<(), io::Error>;
-}
-
+use std::{net::IpAddr, os::unix::net::SocketAddr, sync::Arc, time::{self, Duration, Instant}};
 use tokio::{
     io::{self, copy_bidirectional},
     net::TcpStream,
-    sync::oneshot,
 };
 
 use crate::{
     backend::Backend,
-    config::{BackendOptions, Config, LoadBalancerStrategy},
+    config::{Config, LoadBalancerStrategy},
     peer::{Peer, tcpsocket_from_address},
     security::Security,
     selector::{RoundRobin, Selector},
 };
 
-type SelectionRequest = oneshot::Sender<Option<std::net::SocketAddr>>;
+pub trait TcpProxy {
+    async fn proxy_connection(
+        incoming: TcpStream,
+        upstream: std::net::SocketAddr,
+    ) -> Result<(), io::Error>;
+}
 
 pub struct NetworkLoadBalancer {
     pub security: Security,
-    sender: tokio::sync::mpsc::UnboundedSender<SelectionRequest>,
     backend: Backend,
+    selector: Box<dyn Selector>,
     balancer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -44,55 +42,66 @@ impl NetworkLoadBalancer {
             selector.add_peer(p);
         });
 
-        let (request_tx, mut request_rx) =
-            tokio::sync::mpsc::unbounded_channel::<SelectionRequest>();
-
-        let balancer_task = tokio::spawn(async move {
-            while let Some(response_tx) = request_rx.recv().await {
-                let peer_addr = selector
-                    .select_peer()
-                    .and_then(|peer| peer.address.to_socket_addrs());
-
-                let _ = response_tx.send(peer_addr);
-            }
-        });
-
         Self {
             security: cfg.security.to_owned(),
             backend: backend,
-            sender: request_tx,
-            balancer_task: Some(balancer_task),
+            balancer_task: None,
+            selector: Box::new(selector),
         }
     }
 
-    pub fn is_allowed(&self, ip: &IpAddr) -> bool {
+    fn is_allowed(&self, ip: &IpAddr) -> bool {
         !self.security.is_blacklisted(ip) && self.security.is_whitelisted(ip)
     }
 
-    pub async fn select_peer_address(&self) -> Option<std::net::SocketAddr> {
-        let (response_tx, response_rx) = oneshot::channel();
+    fn listener_task(&mut self, stream: TcpStream, downstream: std::net::SocketAddr) {
+        let ip = downstream.ip();
 
-        if self.sender.send(response_tx).is_ok() {
-            return response_rx
-                .await
-                .ok()
-                .expect("failed to get response from rx channel");
+        if !self.is_allowed(&ip) {
+            return;
         }
 
-        None
+        if let Some(peer) = self.selector.next() {
+            tokio::spawn(async move {
+                let socket_addr = peer 
+                    .address
+                    .to_socket_addrs()
+                    .expect("peer does not contain valid socket address");
+
+                match NetworkLoadBalancer::proxy_connection(stream, socket_addr).await {
+                    Err(e) => {
+                        println!("Error proxying {:?}", e)
+                    }
+                    _ => {}
+                }
+            });
+        }
     }
 
+    pub async fn run_forever(&mut self, listener: tokio::net::TcpListener) {
+        while let Ok((stream, addr)) = listener.accept().await {
+            self.listener_task(stream, addr);
+        }
+    }
 
+    pub async fn run_until(&mut self, listener: tokio::net::TcpListener, duration: Duration) {
+        let now = Instant::now();
+        while let Ok((stream, addr)) = listener.accept().await {
+            
+            if now.elapsed() > duration {
+                break;
+            }
+
+            self.listener_task(stream, addr);
+        } 
+    }
 }
-
 
 impl TcpProxy for NetworkLoadBalancer {
     async fn proxy_connection(
-        &self,
         mut incoming: TcpStream,
         upstream: std::net::SocketAddr,
     ) -> Result<(), io::Error> {
-
         let socket = tcpsocket_from_address(&upstream)?;
         let mut outgoing = socket.connect(upstream).await?;
 
