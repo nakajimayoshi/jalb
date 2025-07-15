@@ -1,19 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{atomic::{AtomicUsize, Ordering}, Arc, RwLock},
 };
 
 use crate::{config::LoadBalancerConfig, peer::Peer};
 
 pub trait Selector: Send + Sync {
-    fn select_peer(&mut self) -> Option<&Peer>;
+    fn next(&mut self) -> Option<Arc<Peer>>;
     fn add_peer(&mut self, peer: Peer);
 }
 
 #[derive(Debug)]
 pub struct RoundRobin {
     last_idx: usize,
-    pool: Vec<Peer>,
+    pool: Vec<Arc<Peer>>,
 }
 
 impl RoundRobin {
@@ -32,18 +32,19 @@ impl Default for RoundRobin {
 }
 
 impl Selector for RoundRobin {
-    fn select_peer(&mut self) -> Option<&Peer> {
-        if self.pool.is_empty() {
+
+    fn next(&mut self) -> Option<Arc<Peer>> {
+        let len = self.pool.len();
+        if len == 0 {
             return None;
         }
 
-        self.last_idx = (self.last_idx + 1) % self.pool.len();
-
-        self.pool.get(self.last_idx)
+        self.last_idx = (self.last_idx + 1) % len;
+        self.pool.get(self.last_idx).cloned()
     }
 
     fn add_peer(&mut self, peer: Peer) {
-        self.pool.push(peer)
+        self.pool.push(Arc::new(peer))
     }
 }
 
@@ -69,6 +70,6 @@ mod tests {
             selector.add_peer(peer);
         }
 
-        let peer1 = selector.select_peer();
+        let peer1 = selector.next();
     }
 }

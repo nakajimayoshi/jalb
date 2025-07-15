@@ -147,14 +147,14 @@ impl NetworkTarget {
     /// assert_eq!(target.as_string(), "http://example.com/api/v1/users");
     /// ```
     pub fn push(&mut self, path: &str) -> Result<(), NetworkTargetError> {
-        // HACK: fought the borrow checker for awhile on this one. This shouldn't harm performance much
+        // TODO: fought the borrow checker for awhile on this one. This shouldn't harm performance much
         // unless you're constantly pushing paths during runtime.
         let str = self.clone().as_string();
         match self {
             Self::Url(url) => match url.path_segments_mut() {
                 Ok(mut segments) => {
                     segments.push(path);
-                    return Ok(());
+                    Ok(())
                 }
 
                 Err(_) => Err(NetworkTargetError::InvalidUrlBase(str)),
