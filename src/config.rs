@@ -321,9 +321,15 @@ struct LoggingConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MetricsConfig {
+    enabled: bool
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     loadbalancer: LoadBalancerConfig,
     logging: LoggingConfig,
+    pub metrics: MetricsConfig,
     pub security: Security,
     pub backend: BackendOptions,
 }
@@ -379,6 +385,10 @@ impl Config {
 
     pub fn logfile_path(&self) -> LoggingPath {
         self.logging.path.clone().unwrap_or_default()
+    }
+    
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics.enabled
     }
 }
 

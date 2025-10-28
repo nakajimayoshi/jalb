@@ -8,6 +8,9 @@ port = 6331
 max_connections = 1000
 max_requests_per_connection = 100
 
+[metrics]
+enabled = true
+
 [logging]
 rotate_logs = true
 log_capacity_tb = 10

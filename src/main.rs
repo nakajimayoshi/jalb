@@ -21,7 +21,7 @@ mod load_balancer;
 mod peer;
 mod security;
 mod selector;
-
+mod metrics;
 // make a load balancer with the following requirements:
 // 1. Multi-strategy (e.g. Round Robin, Least Connections, Weighted Round Robin, Geo-based, etc.)
 // 2. Secure. No taking arbitrary strings as input. Protection against Ddos with optional rate-limiting, IP whitelisting/blacklisting, TLS.
@@ -64,7 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listener_addr.ip(),
         listener_addr.port()
     );
-
 
     load_balancer.run_forever(listener).await;
 
