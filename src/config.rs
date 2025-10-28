@@ -237,7 +237,6 @@ impl LoggingPath {
         let mut path: PathBuf;
 
         const PROGRAM_NAME: &'static str = "jalb";
-        // --- Windows ---
         #[cfg(target_os = "windows")]
         {
             let appdata_path = env::var("LOCALAPPDATA").map_err(|e| {
@@ -250,7 +249,6 @@ impl LoggingPath {
             path.push(PROGRAM_NAME);
         }
 
-        // --- macOS ---
         #[cfg(target_os = "macos")]
         {
             use std::env;
@@ -268,7 +266,6 @@ impl LoggingPath {
             path.push(PROGRAM_NAME);
         }
 
-        // --- Linux (and other Unix-like systems) ---
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             let xdg_data_home = env::var("XDG_DATA_HOME");
@@ -386,7 +383,7 @@ impl Config {
     pub fn logfile_path(&self) -> LoggingPath {
         self.logging.path.clone().unwrap_or_default()
     }
-    
+
     pub fn metrics_enabled(&self) -> bool {
         self.metrics.enabled
     }

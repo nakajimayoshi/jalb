@@ -5,7 +5,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-
+use log::info;
 use tokio::{self, net::TcpListener};
 
 use config::Config;
@@ -39,16 +39,9 @@ struct Args {
     port: u16,
 
     #[arg(long)]
-    worker_threads: usize, // log_level: LogLevel
-}
+    worker_threads: usize,
 
-pub async fn listen_and_serve(
-    listener: tokio::net::TcpListener,
-    load_balancer: NetworkLoadBalancer,
-) -> Result<(), io::Error> {
-    while let Ok((stream, addr)) = listener.accept().await {}
-
-    Ok(())
+    // log_level: LogLevel
 }
 
 #[tokio::main]
@@ -59,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut load_balancer = NetworkLoadBalancer::new_from_config(&cfg);
 
-    println!(
+    info!(
         "load balancer listening on {}:{}",
         listener_addr.ip(),
         listener_addr.port()

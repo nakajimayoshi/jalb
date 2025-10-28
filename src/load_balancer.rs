@@ -12,6 +12,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::error::Error;
+use http::HeaderMap;
 use tokio::{
     io::{self, copy_bidirectional},
     net::TcpStream,
@@ -149,6 +150,7 @@ impl NetworkLoadBalancer {
         let request = String::from_utf8_lossy(&buffer[..n]);
 
         if request.starts_with("GET /metrics") {
+            let headers = request.lines().collect::<Vec<&str>>();
             let body = metrics_engine.metrics();
 
             let response = format!(

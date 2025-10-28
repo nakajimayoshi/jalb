@@ -1,21 +1,58 @@
 use std::{collections::HashSet, net::IpAddr};
-
+use std::fmt::{Display, Formatter};
+use std::process::exit;
 use serde::Deserialize;
-
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use log::error;
+use url::quirks::password;
 use crate::config::NetworkTarget;
+
+fn hash_password(password: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+
+    argon2.hash_password(password.as_bytes(), &salt).expect("failed to hash password").to_string()
+}
+
+
+pub enum AuthorizationType {
+    BasicUserAuth(String, String),
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Security {
     ip_whitelist: HashSet<IpAddr>,
     ip_blacklist: HashSet<IpAddr>,
+    user: Option<String>,
+    password_hash: Option<String>,
 }
 
 impl Security {
-    pub fn new() -> Self {
-        Security {
-            ip_blacklist: HashSet::new(),
-            ip_whitelist: HashSet::new(),
+    pub fn new(auth: AuthorizationType) -> Self {
+
+        match auth {
+            AuthorizationType::BasicUserAuth(user, password) => {
+                let password_hash = hash_password(&password);
+
+                 Self {
+                    ip_blacklist: HashSet::new(),
+                    ip_whitelist: HashSet::new(),
+                    user: Some(user),
+                    password_hash: Some(password_hash),
+                }
+            }
         }
+    }
+
+    pub fn verify_password(&self, password: &str) -> bool {
+        if let Some(hash) = &self.password_hash {
+            return hash == hash_password(&password).as_str();
+        }
+
+        false
     }
 
     pub fn is_blacklisted(&self, ip: &IpAddr) -> bool {
@@ -57,7 +94,9 @@ impl Security {
 
 impl Default for Security {
     fn default() -> Self {
-        Self::new()
+        const DEFAULT_USER: &'static str = "admin";
+        const DEFAULT_PASSWORD: &'static str = "jalb";
+        Self::new(AuthorizationType::BasicUserAuth(DEFAULT_USER.to_string(), DEFAULT_PASSWORD.to_string()))
     }
 }
 
@@ -70,7 +109,7 @@ mod test {
 
     #[test]
     fn test_ip_filter_basic() {
-        let mut filter = Security::new();
+        let mut filter = Security::default();
         filter.add_to_whitelist(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
         let allowed_ip: IpAddr = "127.0.0.1".parse().unwrap();
@@ -82,7 +121,7 @@ mod test {
 
     #[test]
     fn test_ip_filter_no_whitelist() {
-        let mut filter = Security::new();
+        let mut filter = Security::default();
 
         filter.add_to_blacklist("168.11.12.15".parse().unwrap());
 
