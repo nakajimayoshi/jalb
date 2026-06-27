@@ -1,17 +1,17 @@
 version = "1"
 
 [loadbalancer]
-type = "network"
-strategy = "round_robin"
-log_level = "info"                # debug, warn, error
+type = "network"                    # "network" or "application"
+strategy = "round_robin"           # round_robin, least_used, weighted_average, geo
+listener_address = "127.0.0.1"
 port = 6331
 max_connections = 1000
 max_requests_per_connection = 100
 
 [logging]
+log_level = "info"                 # debug, info, warn, error
 rotate_logs = true
-log_capacity_tb = 10
-listener_address = "127.0.0.1"
+log_capacity_mb = 10
 path = "./log.txt"
 
 [security]
@@ -21,90 +21,14 @@ ip_blacklist = []
 [backend]
 name = "auth service"
 health_endpoint = "/healthz"
-health_check_interval = 30
-health_check_timeout = 5
+health_check_interval_seconds = 30
+health_check_timeout_seconds = 5
 failed_request_threshold = 5
-timeout_ms = 5000
+request_timeout_seconds = 5
 rate_limit = 400
 peers = [
-    { address = "127.0.0.1:4000", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4001", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4002", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4003", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4004", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4005", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4006", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4007", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4008", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4009", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4010", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4011", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4012", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4013", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4014", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4015", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4016", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4017", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
-    { address = "127.0.0.1:4018", weight = 1, coordinates = [
-        35.3,
-        135.3,
-    ] },
-    { address = "127.0.0.1:4019", weight = 1, coordinates = [
-        35.4,
-        135.4,
-    ] },
+    { address = "127.0.0.1:4000", weight = 1, coordinates = { x = 35.3, y = 135.3 } },
+    { address = "127.0.0.1:4001", weight = 1, coordinates = { x = 35.4, y = 135.4 } },
+    { address = "127.0.0.1:4002", weight = 1, coordinates = { x = 35.3, y = 135.3 } },
+    { address = "127.0.0.1:4003", weight = 1, coordinates = { x = 35.4, y = 135.4 } },
 ]
