@@ -1,6 +1,4 @@
-use std::{error, io, net::AddrParseError};
-use thiserror;
-use toml;
+use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

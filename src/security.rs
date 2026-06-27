@@ -2,8 +2,6 @@ use std::{collections::HashSet, net::IpAddr};
 
 use serde::Deserialize;
 
-use crate::config::NetworkTarget;
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct Security {
     ip_whitelist: HashSet<IpAddr>,
@@ -64,7 +62,7 @@ impl Default for Security {
 #[cfg(test)]
 mod test {
 
-    use std::{net::Ipv4Addr, str::FromStr};
+    use std::net::Ipv4Addr;
 
     use super::*;
 
@@ -76,8 +74,9 @@ mod test {
         let allowed_ip: IpAddr = "127.0.0.1".parse().unwrap();
         let disallowed_ip: IpAddr = "192.168.2.11".parse().unwrap();
 
-        assert!(filter.is_blacklisted(&allowed_ip));
-        assert!(!filter.is_blacklisted(&disallowed_ip));
+        // With a non-empty whitelist, only whitelisted IPs are allowed.
+        assert!(filter.is_whitelisted(&allowed_ip));
+        assert!(!filter.is_whitelisted(&disallowed_ip));
     }
 
     #[test]
@@ -100,10 +99,10 @@ mod test {
         ];
 
         for ip in allowed_ips {
-            assert!(filter.is_blacklisted(&ip))
+            assert!(!filter.is_blacklisted(&ip))
         }
 
         let disallowed_ip = IpAddr::V4(Ipv4Addr::new(168, 11, 12, 15));
-        assert!(!filter.is_blacklisted(&disallowed_ip));
+        assert!(filter.is_blacklisted(&disallowed_ip));
     }
 }

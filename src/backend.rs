@@ -1,5 +1,5 @@
-use crate::config::{BackendOptions, NetworkTarget};
-use std::{str::FromStr, time::Duration};
+use crate::config::BackendOptions;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct Backend {

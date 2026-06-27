@@ -1,9 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{atomic::{AtomicUsize, Ordering}, Arc, RwLock},
-};
+use std::sync::Arc;
 
-use crate::{config::LoadBalancerConfig, peer::Peer};
+use crate::peer::Peer;
 
 pub trait Selector: Send + Sync {
     fn next(&mut self) -> Option<Arc<Peer>>;
@@ -70,6 +67,18 @@ mod tests {
             selector.add_peer(peer);
         }
 
-        let peer1 = selector.next();
+        // Consecutive selections should hand out distinct peers, and the
+        // selector should cycle back to the start after exhausting the pool.
+        let first = selector.next().unwrap();
+        let second = selector.next().unwrap();
+        assert_ne!(first.address, second.address);
+
+        // After one full lap of the 6-peer pool we should land on `second` again.
+        let second_addr = second.address.clone();
+        let mut cycled = second;
+        for _ in 0..6 {
+            cycled = selector.next().unwrap();
+        }
+        assert_eq!(cycled.address, second_addr);
     }
 }

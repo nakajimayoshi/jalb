@@ -2,10 +2,11 @@ use crate::peer::Peer;
 use log;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
+use std::env;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time;
 use std::{fs, io};
@@ -17,8 +18,8 @@ use crate::security::Security;
 
 const LOG_FILE_SIZE_HARD_LIMIT_MB: usize = 10;
 
-#[derive(Debug, Deserialize, Default)]
-enum JalbConfigVersion {
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+pub enum JalbConfigVersion {
     #[default]
     #[serde(rename = "1")]
     V1,
@@ -85,7 +86,7 @@ impl BackendOptions {
     }
 
     pub fn get_request_timeout(&self) -> Option<time::Duration> {
-        if let Some(timeout) = self.health_check_timeout_seconds {
+        if let Some(timeout) = self.request_timeout_seconds {
             return Some(time::Duration::from_secs(timeout.into()));
         }
 
@@ -134,17 +135,21 @@ impl NetworkTarget {
         }
     }
 
-    /// Appends a path segment to the NetworkTarget.
+    /// Appends a single path segment to the `NetworkTarget`.
     ///
-    /// This operation is only valid for the `Url` variant and will silently return if performed
-    /// on a SocketAddr
-    ///
+    /// This operation is only valid for the [`NetworkTarget::Url`] variant; on a
+    /// [`NetworkTarget::SocketAddr`] it returns [`NetworkTargetError::PushToSocketAddr`].
+    /// The segment is percent-encoded, so any `/` it contains is escaped rather
+    /// than treated as a path separator.
     ///
     /// # Example
     /// ```
+    /// use jalb::NetworkTarget;
+    /// use std::str::FromStr;
+    ///
     /// let mut target = NetworkTarget::from_str("http://example.com").unwrap();
-    /// target.push("api/v1/users").unwrap();
-    /// assert_eq!(target.as_string(), "http://example.com/api/v1/users");
+    /// target.push("users").unwrap();
+    /// assert_eq!(target.as_string(), "http://example.com/users");
     /// ```
     pub fn push(&mut self, path: &str) -> Result<(), NetworkTargetError> {
         // TODO: fought the borrow checker for awhile on this one. This shouldn't harm performance much
@@ -236,7 +241,7 @@ impl LoggingPath {
     fn new_with_default_log_path() -> Result<Self, io::Error> {
         let mut path: PathBuf;
 
-        const PROGRAM_NAME: &'static str = "jalb";
+        const PROGRAM_NAME: &str = "jalb";
         // --- Windows ---
         #[cfg(target_os = "windows")]
         {
@@ -253,11 +258,7 @@ impl LoggingPath {
         // --- macOS ---
         #[cfg(target_os = "macos")]
         {
-            use std::env;
-
             let home_dir = env::var("HOME").map_err(|e| {
-                use std::io;
-
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Could not find HOME env var: {}", e),
@@ -322,6 +323,8 @@ struct LoggingConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    version: JalbConfigVersion,
     loadbalancer: LoadBalancerConfig,
     logging: LoggingConfig,
     pub security: Security,
@@ -337,12 +340,28 @@ impl Config {
         Ok(config)
     }
 
+    pub fn version(&self) -> JalbConfigVersion {
+        self.version
+    }
+
     pub fn strategy(&self) -> LoadBalancerStrategy {
         self.loadbalancer.strategy
     }
 
     pub fn load_balancer_type(&self) -> LoadBalancerType {
         self.loadbalancer.load_balancer_type
+    }
+
+    pub fn max_connections(&self) -> u32 {
+        self.loadbalancer.max_connections
+    }
+
+    pub fn max_requests_per_connection(&self) -> u32 {
+        self.loadbalancer.max_requests_per_connection
+    }
+
+    pub fn log_level(&self) -> Option<log::Level> {
+        self.logging.log_level
     }
 
     pub fn ip(&self) -> IpAddr {
@@ -370,15 +389,14 @@ impl Config {
         const BYTES_PER_MEGABYTE: usize = 1024 * 1024;
 
         if let Some(max_size) = self.logging.log_capacity_mb {
-            println!("max size req: {}", max_size);
             return max_size * BYTES_PER_MEGABYTE;
         }
 
         LOG_FILE_SIZE_HARD_LIMIT_MB * BYTES_PER_MEGABYTE
     }
 
-    pub fn logfile_path(&self) -> LoggingPath {
-        self.logging.path.clone().unwrap_or_default()
+    pub fn logfile_path(&self) -> PathBuf {
+        self.logging.path.clone().unwrap_or_default().0
     }
 }
 
@@ -391,7 +409,7 @@ mod tests {
     fn test_should_load_from_file() -> Result<(), ConfigError> {
         let config = Config::load_from_file("jalb.toml")?;
         config.load_balancer_type();
-        assert!(config.rotate_logs() == true);
+        assert!(config.rotate_logs());
         assert!(config.log_file_max_size() == 10485760);
         let ip = config.ip();
         assert!(ip.is_ipv4());

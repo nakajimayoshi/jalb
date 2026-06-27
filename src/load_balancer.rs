@@ -1,4 +1,7 @@
-use std::{net::IpAddr, os::unix::net::SocketAddr, sync::Arc, time::{self, Duration, Instant}};
+use std::{
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{self, copy_bidirectional},
     net::TcpStream,
@@ -7,11 +10,12 @@ use tokio::{
 use crate::{
     backend::Backend,
     config::{Config, LoadBalancerStrategy},
-    peer::{Peer, tcpsocket_from_address},
+    peer::tcpsocket_from_address,
     security::Security,
     selector::{RoundRobin, Selector},
 };
 
+#[allow(async_fn_in_trait)]
 pub trait TcpProxy {
     async fn proxy_connection(
         incoming: TcpStream,
@@ -23,11 +27,15 @@ pub struct NetworkLoadBalancer {
     pub security: Security,
     backend: Backend,
     selector: Box<dyn Selector>,
-    balancer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl NetworkLoadBalancer {
-    pub(crate) fn new_from_config(cfg: &Config) -> Self {
+    /// Builds a [`NetworkLoadBalancer`] from a parsed [`Config`].
+    ///
+    /// The configured [`LoadBalancerStrategy`] determines which [`Selector`]
+    /// backs peer selection. Only [`LoadBalancerStrategy::RoundRobin`] is
+    /// currently implemented; the other strategies are not yet available.
+    pub fn from_config(cfg: &Config) -> Self {
         let backend = Backend::from_config(&cfg.backend);
 
         let mut selector = match cfg.strategy() {
@@ -35,7 +43,6 @@ impl NetworkLoadBalancer {
             LoadBalancerStrategy::WeightedAverage => todo!(),
             LoadBalancerStrategy::LeastUsed => todo!(),
             LoadBalancerStrategy::Geolocation => todo!(),
-            _ => todo!(),
         };
 
         cfg.backend.peers().drain(0..).for_each(|p| {
@@ -44,10 +51,15 @@ impl NetworkLoadBalancer {
 
         Self {
             security: cfg.security.to_owned(),
-            backend: backend,
-            balancer_task: None,
+            backend,
             selector: Box::new(selector),
         }
+    }
+
+    /// Returns the upstream backend pool settings (health checks, timeouts,
+    /// rate limit) this load balancer was built with.
+    pub fn backend(&self) -> &Backend {
+        &self.backend
     }
 
     fn is_allowed(&self, ip: &IpAddr) -> bool {
@@ -63,16 +75,16 @@ impl NetworkLoadBalancer {
 
         if let Some(peer) = self.selector.next() {
             tokio::spawn(async move {
-                let socket_addr = peer 
-                    .address
-                    .to_socket_addrs()
-                    .expect("peer does not contain valid socket address");
+                let Some(socket_addr) = peer.address.to_socket_addrs() else {
+                    log::error!(
+                        "peer {} does not resolve to a socket address",
+                        peer.address.as_string()
+                    );
+                    return;
+                };
 
-                match NetworkLoadBalancer::proxy_connection(stream, socket_addr).await {
-                    Err(e) => {
-                        println!("Error proxying {:?}", e)
-                    }
-                    _ => {}
+                if let Err(e) = NetworkLoadBalancer::proxy_connection(stream, socket_addr).await {
+                    log::error!("error proxying connection to {socket_addr}: {e}");
                 }
             });
         }
