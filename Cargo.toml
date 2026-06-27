@@ -1,8 +1,22 @@
 [package]
 name = "jalb"
-description = "A simple load balancer for backend HTTP services"
+description = "A simple, configurable TCP proxy and load balancer for backend services"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/nakajimayoshi/jalb"
+readme = "README.md"
+keywords = ["load-balancer", "proxy", "tcp", "networking"]
+categories = ["network-programming"]
+
+# `jalb` is both a library (for embedding in other Rust projects) and a small
+# CLI binary that runs the load balancer from a TOML config file.
+[lib]
+name = "jalb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jalb"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
