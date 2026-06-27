@@ -1,8 +1,7 @@
-use geo;
 use log::error;
-use std::{io, net::SocketAddr, str::FromStr, time::Duration};
+use std::{io, str::FromStr, time::Duration};
 use tokio::{
-    net::{TcpSocket, TcpStream, ToSocketAddrs},
+    net::{TcpSocket, TcpStream},
     time::timeout,
 };
 
@@ -50,7 +49,11 @@ impl Peer {
 
         if let Some(path) = backend_config.health_endpoint.clone() {
             let mut base_health_addr = addr.clone();
-            health_addr = Some(base_health_addr)
+            // For URL targets the health endpoint is a sub-path of the peer
+            // address; raw socket targets have no path to append, so the error
+            // is ignored and the bare address is used for the health check.
+            let _ = base_health_addr.push(&path);
+            health_addr = Some(base_health_addr);
         }
 
         Ok(Self {
